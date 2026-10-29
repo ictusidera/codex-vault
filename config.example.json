@@ -1,0 +1,17 @@
+{
+  "format": "codex-vault-config/1",
+  "vault_id": "0123456789abcdef0123456789abcdef",
+  "repository": "E:/CodexVault/restic",
+  "restic": "restic",
+  "codex_home": "C:/Users/YOUR_USER/.codex",
+  "sqlite_home": "C:/Users/YOUR_USER/.codex",
+  "sqlite_home_explicit": false,
+  "projects": ["C:/Dev/Projects", "D:/ExistingProjects/ImportantSystem"],
+  "extra_sources": [],
+  "include_auth": false,
+  "project_excludes": ["node_modules", "__pycache__", ".venv", "venv", ".pytest_cache"],
+  "work_dir": "C:/Users/YOUR_USER/AppData/Local/CodexVault/work",
+  "credential_file": "C:/Users/YOUR_USER/AppData/Local/CodexVault/repository.dpapi",
+  "password_file": null,
+  "restic_timeout_seconds": 21600
+}

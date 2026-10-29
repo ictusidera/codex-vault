@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.venv/
+vault.json
+*.dpapi
+work/
+*.log
