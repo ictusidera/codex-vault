@@ -61,6 +61,29 @@ class Fixture(unittest.TestCase):
 
 
 class CoreTests(Fixture):
+    def test_git_relative_common_dir_resolves_against_repository_not_process_cwd(self):
+        from codex_vault.core import git_info
+        (self.project / ".git").mkdir()
+        result = subprocess.CompletedProcess([], 0, ".git\n", "")
+        with patch("codex_vault.core.subprocess.run", return_value=result) as run:
+            info = git_info(self.project)
+        self.assertEqual(info["common_dir"], str((self.project / ".git").resolve()))
+        self.assertEqual(run.call_args_list[0].args[0][-2:], ["rev-parse", "--git-common-dir"])
+
+    def test_git_absolute_common_dir_is_preserved(self):
+        from codex_vault.core import git_info
+        common = self.root / "external-git"
+        common.mkdir()
+        result = subprocess.CompletedProcess([], 0, str(common) + "\n", "")
+        with patch("codex_vault.core.subprocess.run", return_value=result):
+            self.assertEqual(git_info(self.project)["common_dir"], str(common.resolve()))
+
+    def test_git_echoed_option_is_rejected_even_with_success_exit_code(self):
+        from codex_vault.core import git_info
+        result = subprocess.CompletedProcess([], 0, "--path-format=absolute\n.git\n", "")
+        with patch("codex_vault.core.subprocess.run", return_value=result), self.assertRaises(VaultError):
+            git_info(self.project)
+
     @unittest.skipUnless(os.name == "nt", "DPAPI requires a real Windows user profile")
     def test_windows_dpapi_roundtrip(self):
         from codex_vault.secure import save_password, load_password

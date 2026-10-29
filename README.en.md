@@ -1,4 +1,6 @@
-# Codex Vault 1.0
+# Codex Vault 1.0.1
+
+1.0.1 fixes Git common-directory discovery compatibility. Existing configuration, credentials, and backup repositories can be retained. See the [changelog](docs/CHANGELOG.md).
 
 Codex Vault backs up local Codex conversations, state databases, settings, and development projects as encrypted, versioned snapshots in a restic repository. It is designed primarily for everyday use on Windows and uses only the Python standard library.
 

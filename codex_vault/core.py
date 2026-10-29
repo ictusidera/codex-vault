@@ -254,11 +254,22 @@ def git_info(root):
                            text=True, encoding="utf-8", errors="replace", timeout=30, env=env)
         return r.stdout.strip() if r.returncode == 0 else None
     try:
-        common = run("rev-parse", "--path-format=absolute", "--git-common-dir")
+        # Older Git versions may echo an unknown rev-parse option to stdout
+        # while still returning success. Avoid --path-format and resolve the
+        # documented relative output against the directory passed to git -C.
+        common = run("rev-parse", "--git-common-dir")
         if not common:
             return None
+        if common.startswith("--") or "\n" in common or "\r" in common:
+            raise VaultError("Gitの共通ディレクトリ取得結果が不正です。git --version とGit実行環境を確認してください")
+        common_path = Path(common)
+        if not common_path.is_absolute():
+            common_path = Path(root).resolve() / common_path
+        common_path = common_path.resolve()
+        if not common_path.is_dir():
+            raise VaultError(f"Gitの共通ディレクトリが存在しません: {common_path}")
         # No remote URL stored: URLs sometimes contain credentials.
-        return {"root": str(root), "common_dir": common,
+        return {"root": str(root), "common_dir": str(common_path),
                 "head": run("rev-parse", "HEAD"), "status": run("status", "--porcelain=v1"),
                 "worktrees": run("worktree", "list", "--porcelain")}
     except (FileNotFoundError, subprocess.TimeoutExpired):
