@@ -61,6 +61,42 @@ class Fixture(unittest.TestCase):
 
 
 class CoreTests(Fixture):
+    def test_locked_provisioning_guard_is_not_opened_and_is_recorded(self):
+        guard = self.codex / ".codex-provisioning-28b1f1bfa879205b.guard"
+        guard.write_text("runtime guard")
+        original_open = Path.open
+        def guarded_open(path, *args, **kwargs):
+            if path == guard:
+                raise PermissionError("simulated Windows guard read denial")
+            return original_open(path, *args, **kwargs)
+        with patch.object(Path, "open", guarded_open):
+            payload, manifest = stage(self.c, "hot")
+        self.assertFalse((payload / "sources/codex" / guard.name).exists())
+        self.assertTrue(any(s["path"] == str(guard) and s["reason"] == "configured_exclusion"
+                            for s in manifest["skipped"]))
+        self.assertTrue((payload / "sources/codex/sessions/rollout-one.jsonl").is_file())
+        verify_payload(payload)
+
+    def test_unreadable_history_is_still_fatal(self):
+        original_open = Path.open
+        def denied_open(path, *args, **kwargs):
+            if path == self.raw:
+                raise PermissionError("unreadable real history")
+            return original_open(path, *args, **kwargs)
+        with patch.object(Path, "open", denied_open), self.assertRaises(PermissionError):
+            stage(self.c, "hot")
+
+    def test_excluded_auth_is_not_opened_for_sqlite_detection(self):
+        auth = self.codex / "auth.json"
+        original_open = Path.open
+        def denied_open(path, *args, **kwargs):
+            if path == auth:
+                raise PermissionError("excluded auth must not be inspected")
+            return original_open(path, *args, **kwargs)
+        with patch.object(Path, "open", denied_open):
+            payload, _ = stage(self.c, "hot")
+        self.assertFalse((payload / "sources/codex/auth.json").exists())
+
     def test_git_relative_common_dir_resolves_against_repository_not_process_cwd(self):
         from codex_vault.core import git_info
         (self.project / ".git").mkdir()

@@ -189,6 +189,9 @@ def stage(c, mode, stopped=False):
     from .archive import inspect_jsonl
     for s in sources:
         patterns = [] if s["kind"] in ("codex", "sqlite", "git_metadata") else list(c["project_excludes"])
+        if s["kind"] == "codex":
+            # Runtime provisioning guards are recreated by Codex, not recovery data.
+            patterns += [".codex-provisioning-*.guard"]
         if s["kind"] == "codex" and not c.get("include_auth", False):
             patterns += ["auth.json"]
         before = tree_stamp(s["original_path"], patterns)

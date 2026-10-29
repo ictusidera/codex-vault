@@ -1,3 +1,10 @@
+# 1.0.2 — 2026-10-29
+
+- Exclude Codex runtime `.codex-provisioning-*.guard` files from collection.
+- Apply exclusions before opening files for SQLite header detection. Previously, even excluded files could cause a read-permission failure.
+- Record omissions in the manifest; retain fatal errors for unreadable real history or other non-excluded files.
+- Added three regression tests, including simulated Windows guard read denial. No configuration changes or repository reinitialization required.
+
 # 1.0.1 — 2026-10-29
 
 - Git common-directory discovery no longer uses `--path-format=absolute`.

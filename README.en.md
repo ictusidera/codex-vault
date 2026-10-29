@@ -1,6 +1,6 @@
-# Codex Vault 1.0.1
+# Codex Vault 1.0.2
 
-1.0.1 fixes Git common-directory discovery compatibility. Existing configuration, credentials, and backup repositories can be retained. See the [changelog](docs/CHANGELOG.md).
+1.0.2 fixes Git common-directory discovery compatibility. Existing configuration, credentials, and backup repositories can be retained. See the [changelog](docs/CHANGELOG.md).
 
 Codex Vault backs up local Codex conversations, state databases, settings, and development projects as encrypted, versioned snapshots in a restic repository. It is designed primarily for everyday use on Windows and uses only the Python standard library.
 
@@ -38,6 +38,8 @@ This implementation does not use VSS. restic receives files only after staging c
 - Include the recovery tool and README in each snapshot under `recovery/tool`. Configuration JSON and passwords are not included in that recovery-tool copy.
 
 ### Exclusions and Limitations
+
+- `.codex-provisioning-*.guard` runtime coordination files are excluded and recorded in the manifest. Excluded files are not opened for SQLite detection. Other read-permission errors remain fatal.
 
 - Default project exclusions are `node_modules`, `__pycache__`, `.venv`, `venv`, and `.pytest_cache`. These rules match path components, not just directory names. Remove an exclusion from the configuration if it would omit an important asset.
 - `auth.json` is excluded by default. Other settings or conversations may still contain secrets. Treat the entire backup as confidential.

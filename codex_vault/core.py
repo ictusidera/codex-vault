@@ -158,6 +158,10 @@ def copy_tree(source, target, patterns, warnings, skipped, sqlite=True):
         if sqlite:
             for e in entries:
                 p = Path(e.path)
+                # Excluded files must not be opened even for format detection.
+                # Some Codex coordination guards deliberately deny reads.
+                if excluded(p.relative_to(source), patterns):
+                    continue
                 if not linked(p) and e.is_file(follow_symlinks=False) and sqlite_file(p):
                     dbs.add(e.name)
         for e in entries:
