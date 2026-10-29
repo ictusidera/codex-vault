@@ -12,10 +12,29 @@ import uuid
 
 from . import __version__
 from .core import (VaultError, absolute, copy_tree, discover_git, inside, inventory,
-                   no_link_ancestors, now, read_json, verify_payload, write_json)
+                   no_link_ancestors, now, read_json, remove_staging, verify_payload, write_json)
 from .secure import load_password
 
 DEFAULT_EXCLUDES = ["node_modules", "__pycache__", ".venv", "venv", ".pytest_cache"]
+# Confirmed in upstream Codex: state/runtime/reclamation.rs, rollout/writer_lock.rs,
+# rmcp-client/src/oauth/{refresh_lock,store_lock}.rs. Do not exclude all *.lock
+# or entire OAuth directories: those directories also contain persistent metadata.
+SQLITE_RUNTIME_EXCLUDES = [".sqlite-maintenance.lock"]
+CODEX_RUNTIME_EXCLUDES = [".codex-provisioning-*.guard",
+                          "/thread-writer-locks/*.lock", "/mcp-oauth-locks/*.lock",
+                          "/tmp/arg0", "/tmp/arg0-windows",
+                          "/tmp/arg0-linux", "/tmp/arg0-macos"]
+
+
+def source_excludes(c, kind):
+    patterns = [] if kind in ("codex", "sqlite", "git_metadata") else list(c["project_excludes"])
+    if kind in ("codex", "sqlite"):
+        patterns += SQLITE_RUNTIME_EXCLUDES
+    if kind == "codex":
+        patterns += CODEX_RUNTIME_EXCLUDES
+        if not c.get("include_auth", False):
+            patterns += ["auth.json"]
+    return patterns
 
 
 def load_config(path):
@@ -147,10 +166,10 @@ def tree_stamp(root, patterns):
     result = []
     for folder, dirs, files in os.walk(root, followlinks=False):
         p = Path(folder)
-        dirs[:] = sorted(d for d in dirs if not linked(p / d) and not excluded((p / d).relative_to(root), patterns))
+        dirs[:] = sorted(d for d in dirs if not excluded((p / d).relative_to(root), patterns) and not linked(p / d))
         for name in sorted(files):
             f = p / name
-            if not linked(f) and not excluded(f.relative_to(root), patterns):
+            if not excluded(f.relative_to(root), patterns) and not linked(f):
                 s = f.stat()
                 result.append((str(f.relative_to(root)), s.st_size, s.st_mtime_ns))
     return result
@@ -164,7 +183,8 @@ def stage(c, mode, stopped=False):
     # Include external Git common dirs, so linked worktree .git pointers have a recovery source.
     for s in sources:
         if s["kind"] in ("project", "codex"):
-            git.extend(discover_git(s["original_path"], c["project_excludes"]))
+            git.extend(discover_git(s["original_path"],
+                                    source_excludes(c, s["kind"]) + list(c["project_excludes"])))
     for g in git:
         if g.get("warning"):
             warnings.append(g["warning"])
@@ -181,22 +201,22 @@ def stage(c, mode, stopped=False):
     validate_paths(c, sources)
     work = absolute(c["work_dir"])
     payload = work / "payload"
-    if payload.exists():
-        no_link_ancestors(payload)
-        shutil.rmtree(payload)
+    remove_staging(work)
     payload.mkdir(parents=True)
     (payload / "sources").mkdir()
     from .archive import inspect_jsonl
     for s in sources:
-        patterns = [] if s["kind"] in ("codex", "sqlite", "git_metadata") else list(c["project_excludes"])
-        if s["kind"] == "codex":
-            # Runtime provisioning guards are recreated by Codex, not recovery data.
-            patterns += [".codex-provisioning-*.guard"]
-        if s["kind"] == "codex" and not c.get("include_auth", False):
-            patterns += ["auth.json"]
-        before = tree_stamp(s["original_path"], patterns)
-        copy_tree(s["original_path"], payload / s["stored_path"], patterns, warnings, skipped)
-        after = tree_stamp(s["original_path"], patterns)
+        patterns = source_excludes(c, s["kind"])
+        phase = "source inventory before copy"
+        try:
+            before = tree_stamp(s["original_path"], patterns)
+            phase = "source copy"
+            copy_tree(s["original_path"], payload / s["stored_path"], patterns, warnings, skipped)
+            phase = "source inventory after copy"
+            after = tree_stamp(s["original_path"], patterns)
+        except OSError as e:
+            e.add_note(f"Phase: {phase}; source: {s['original_path']}; destination: {payload / s['stored_path']}")
+            raise
         if before != after:
             if mode == "cold":
                 raise VaultError(f"cold取得中に保存元が更新されました: {s['original_path']}")
@@ -241,7 +261,15 @@ def backup(c, mode, stopped=False):
               "last_success": True, "repository": c["repository"]}
     write_json(absolute(c["work_dir"]) / "last-success.json", result)
     # Delete plaintext staging after successful encrypted commit. Crash/failure retains it for diagnosis.
-    shutil.rmtree(payload)
+    try:
+        remove_staging(c["work_dir"])
+        result["stage_cleanup_complete"] = True
+    except (OSError, VaultError) as error:
+        # The encrypted snapshot already exists. Report residual plaintext as
+        # an actionable warning, not as a failed backup or a missing snapshot.
+        result["stage_cleanup_complete"] = False
+        result["warnings"].append(f"暗号化バックアップは完了しましたが一時コピーを削除できません。clean-stageで再試行してください: {error}")
+    write_json(absolute(c["work_dir"]) / "last-success.json", result)
     return result
 
 

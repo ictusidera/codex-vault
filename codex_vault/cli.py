@@ -11,12 +11,13 @@ import sqlite3
 import subprocess
 import sys
 import tomllib
+import traceback
 import uuid
 
 from . import __version__
 from .archive import export_archive, records, search_archive
 from .core import (VaultError, absolute, activate, inside, locked, no_link_ancestors,
-                   now, read_json, verify_payload, write_json)
+                   now, read_json, remove_staging, verify_payload, write_json)
 from .engine import (DEFAULT_EXCLUDES, backup, config_sources, load_config, restic,
                      restore, retention, snapshots, validate_paths)
 from .secure import private_dir, save_password
@@ -150,6 +151,7 @@ def parser():
     p = argparse.ArgumentParser(description="Codex Vault: restic暗号化バックアップと検証復旧")
     p.add_argument("--version", action="version", version=__version__)
     p.add_argument("--config", default=str(default_config()), help="設定JSON（サブコマンドより前に指定）")
+    p.add_argument("--debug", action="store_true", help="失敗時にトレースバックを表示（サブコマンドより前に指定）")
     sub = p.add_subparsers(dest="command", required=True)
     q = sub.add_parser("configure", help="初期設定を作成")
     q.add_argument("--repository")
@@ -190,6 +192,7 @@ def parser():
 def main(argv=None):
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     os.umask(0o077)
     args = parser().parse_args(argv)
@@ -242,9 +245,7 @@ def main(argv=None):
                     restic(c, ["check"])
                 elif args.command == "clean-stage":
                     p = Path(c["work_dir"]) / "payload"
-                    no_link_ancestors(p)
-                    if p.exists():
-                        shutil.rmtree(p)
+                    remove_staging(c["work_dir"])
                     result = {"removed": str(p), "note": "削除は通常削除です。SSD上の安全消去を保証しません"}
                 else:
                     work = Path(c["work_dir"])
@@ -266,4 +267,7 @@ def main(argv=None):
             except OSError:
                 pass
         print(message, file=sys.stderr)
+        if args.debug:
+            # Exception stack only: never dump configuration, locals or environment.
+            traceback.print_exception(type(e), e, e.__traceback__, file=sys.stderr)
         return 1

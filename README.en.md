@@ -1,6 +1,6 @@
-# Codex Vault 1.0.2
+# Codex Vault 1.0.5
 
-1.0.2 fixes Git common-directory discovery compatibility. Existing configuration, credentials, and backup repositories can be retained. See the [changelog](docs/CHANGELOG.md).
+1.0.5 excludes generated arg0 helper directories and handles read-only staging copies during Windows cleanup. Existing configuration, credentials, and repositories remain usable. See the [changelog](docs/CHANGELOG.md).
 
 Codex Vault backs up local Codex conversations, state databases, settings, and development projects as encrypted, versioned snapshots in a restic repository. It is designed primarily for everyday use on Windows and uses only the Python standard library.
 
@@ -39,7 +39,11 @@ This implementation does not use VSS. restic receives files only after staging c
 
 ### Exclusions and Limitations
 
-- `.codex-provisioning-*.guard` runtime coordination files are excluded and recorded in the manifest. Excluded files are not opened for SQLite detection. Other read-permission errors remain fatal.
+- Generated `CODEX_HOME/tmp/arg0`, `tmp/arg0-windows`, `tmp/arg0-linux`, and `tmp/arg0-macos` helper directories are excluded before Git discovery, inventory, and copying. The entire `tmp` and `.tmp` directories are not excluded. Ordinary documents and independently registered project directories remain in scope.
+
+- Codex sources exclude `.codex-provisioning-*.guard` files and `*.lock` files in the top-level `thread-writer-locks` and `mcp-oauth-locks` directories. Codex and external SQLite sources also exclude `.sqlite-maintenance.lock` files in their directory trees. These omissions are recorded in the manifest, and excluded files are never opened for format detection.
+- There is no blanket `*.lock` exclusion. Persistent OAuth metadata such as `.enterprise-generation` and `.enterprise-credential-version` files is preserved. Conversation JSONL files, database contents, and registered projects remain in scope; other read failures remain fatal.
+- Recognized databases' `-wal`, `-shm`, and `-journal` sidecars are handled by the SQLite API, without raw header reads or ordinary copies. Unrecognized sidecars are not silently discarded. See [docs/UPSTREAM_LOCKS.md](docs/UPSTREAM_LOCKS.md) for the policy and upstream sources.
 
 - Default project exclusions are `node_modules`, `__pycache__`, `.venv`, `venv`, and `.pytest_cache`. These rules match path components, not just directory names. Remove an exclusion from the configuration if it would omit an important asset.
 - `auth.json` is excluded by default. Other settings or conversations may still contain secrets. Treat the entire backup as confidential.
@@ -205,6 +209,18 @@ Run logs are retained for 30 days in the `logs` directory alongside the configur
 | `1` | Failure. restic's partial-success exit code 3 is also treated as a failure by this tool. Earlier successful snapshots are retained. |
 
 Unexpected termination may produce another Python or OS exit code. Check the logs for any nonzero result.
+
+### Staging Cleanup and Retries
+
+A new backup first removes any previous staging copy. On Windows, copied Git objects can retain their read-only attribute. Cleanup clears that attribute only within `work_dir/payload` and retries the failed removal once. It does not modify original Codex data, projects, repositories, or rollback directories, change ACLs, or force open files to close. Other failures remain errors.
+
+To remove staging explicitly:
+
+```powershell
+python -m codex_vault --debug clean-stage
+```
+
+If encrypted snapshot creation succeeded but subsequent cleanup failed, the result includes the saved snapshot ID, a warning, and `stage_cleanup_complete: false`, with exit code 2. Plaintext staging data remains; investigate and retry `clean-stage`. Failure to remove old staging before a new backup remains a fatal backup error.
 
 ### Retention and Space Reclamation
 
@@ -454,3 +470,11 @@ Design references were reviewed on **2026-10-28**. The implementation does not d
 - [Kopia: Features](https://kopia.io/docs/features/)
 
 The code is licensed under MIT and may be modified and used internally. The restic distribution itself is not included.
+
+## Detailed diagnostics
+
+```powershell
+python -m codex_vault --debug backup --mode hot
+```
+
+Tracebacks include paths and exception messages. Redact private paths and any secrets before sharing. No local-variable, full-configuration or environment dump is included. Permission errors remain fatal.

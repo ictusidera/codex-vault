@@ -58,6 +58,42 @@ def no_link_ancestors(path):
             raise VaultError(f"リンク／再解析ポイントを含むパスは使えません: {part}")
 
 
+def remove_staging(work_dir):
+    """Remove only work_dir/payload; retry deletion of read-only staging copies.
+
+    copy2 preserves Windows read-only attributes (notably Git objects). This
+    helper must never be used for source data, repositories, or rollback copies.
+    onerror is retained for Python 3.11 compatibility; 3.12+ also supports it.
+    """
+    work = Path(work_dir).absolute()
+    payload = work / "payload"
+    no_link_ancestors(payload)
+    if not payload.exists():
+        return
+
+    def retry_readonly(func, failed_path, exc_info):
+        error = exc_info[1]
+        failed = Path(failed_path).absolute()
+        if (not isinstance(error, PermissionError)
+                or func not in (os.unlink, os.remove, os.rmdir)
+                or not failed.is_relative_to(payload)):
+            raise error
+        # Refuse to chmod a link target or leave the designated staging tree.
+        no_link_ancestors(failed)
+        info = failed.lstat()
+        if (not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode))
+                or info.st_mode & stat.S_IWRITE):
+            raise error
+        os.chmod(failed, info.st_mode | stat.S_IWRITE)
+        func(failed_path)  # A second failure propagates; no endless retries.
+
+    try:
+        shutil.rmtree(payload, onerror=retry_readonly)
+    except OSError as error:
+        error.add_note(f"Phase: staging cleanup; path: {payload}")
+        raise
+
+
 def sha256(path):
     h = hashlib.sha256()
     with Path(path).open("rb") as f:
@@ -98,8 +134,12 @@ def locked(work):
 
 
 def sqlite_file(path):
-    with Path(path).open("rb") as f:
-        return f.read(16) == b"SQLite format 3\x00"
+    try:
+        with Path(path).open("rb") as f:
+            return f.read(16) == b"SQLite format 3\x00"
+    except OSError as e:
+        e.add_note(f"SQLite header inspection: {path}")
+        raise
 
 
 def sqlite_check(path):
@@ -138,10 +178,18 @@ def stable_copy(source, target, retries=3):
 
 
 def excluded(rel, patterns):
-    # A pattern without '/' matches any component, otherwise root-relative path.
-    return any((any(fnmatch.fnmatchcase(p, pattern) for p in rel.parts)
-                if "/" not in pattern else fnmatch.fnmatchcase(rel.as_posix(), pattern))
-               for pattern in patterns)
+    # Leading '/' anchors a pattern to the source root. Unanchored single names
+    # match any component; other patterns keep their existing root-relative meaning.
+    for pattern in patterns:
+        if pattern.startswith("/"):
+            if fnmatch.fnmatchcase(rel.as_posix(), pattern[1:]):
+                return True
+        elif "/" not in pattern:
+            if any(fnmatch.fnmatchcase(p, pattern) for p in rel.parts):
+                return True
+        elif fnmatch.fnmatchcase(rel.as_posix(), pattern):
+            return True
+    return False
 
 
 def copy_tree(source, target, patterns, warnings, skipped, sqlite=True):
@@ -161,6 +209,11 @@ def copy_tree(source, target, patterns, warnings, skipped, sqlite=True):
                 # Excluded files must not be opened even for format detection.
                 # Some Codex coordination guards deliberately deny reads.
                 if excluded(p.relative_to(source), patterns):
+                    continue
+                # Entries are sorted, so a base database precedes its sidecars.
+                # The SQLite API handles them; raw header reads are unnecessary.
+                if any(e.name == name + suffix for name in dbs
+                       for suffix in ("-wal", "-shm", "-journal")):
                     continue
                 if not linked(p) and e.is_file(follow_symlinks=False) and sqlite_file(p):
                     dbs.add(e.name)
