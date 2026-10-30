@@ -1,3 +1,12 @@
+# 1.0.6 — 2026-10-29
+
+- Fix a reproduced false cold-backup failure: opening a stopped WAL-mode SQLite database with `mode=ro` can create/rebuild its shared-memory index and create an empty WAL.
+- Return the exact relative paths of databases successfully copied and checked through the SQLite API. Ignore only those databases' `-shm` files and WALs absent/empty at both metadata endpoints during source stability comparison; record paths in each source's `consistency_ignored` manifest field.
+- Keep changes to nonempty WALs, DB files, journals, conversations, and ordinary files significant. Do not use `immutable=1`, manually delete source sidecars, or suppress general source-change errors.
+- Report added, removed, and modified source filenames, bounded to 20 quoted relative paths, with counts. Do not include file contents.
+- Add six regression tests covering cleanly stopped databases, committed data in a stopped WAL, real concurrent WAL commits, ordinary file changes, nonempty WAL truncation/removal, and bounded filename diagnostics.
+- Clarify cold-mode shutdown, `work` versus repository initialization, and external staging/cache placement in both READMEs. No configuration, credentials, or repository migration is needed.
+
 # 1.0.5 — 2026-10-29
 
 - Exclude only the known generated `tmp/arg0`, `tmp/arg0-windows`, `tmp/arg0-linux`, and `tmp/arg0-macos` trees from Codex source collection. Apply the same exclusions before Git discovery. Retain other temporary-directory contents and separately registered projects.

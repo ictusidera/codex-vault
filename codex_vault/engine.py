@@ -171,8 +171,48 @@ def tree_stamp(root, patterns):
             f = p / name
             if not excluded(f.relative_to(root), patterns) and not linked(f):
                 s = f.stat()
-                result.append((str(f.relative_to(root)), s.st_size, s.st_mtime_ns))
+                result.append((f.relative_to(root).as_posix(), s.st_size, s.st_mtime_ns))
     return result
+
+
+def source_changes(before, after, ignored=()):
+    """Compare metadata, ignoring only explicitly identified runtime files."""
+    ignored = set(ignored)
+    old = {path: (size, mtime) for path, size, mtime in before if path not in ignored}
+    new = {path: (size, mtime) for path, size, mtime in after if path not in ignored}
+    return {"added": sorted(new.keys() - old.keys()),
+            "removed": sorted(old.keys() - new.keys()),
+            "modified": sorted(path for path in old.keys() & new.keys() if old[path] != new[path])}
+
+
+def sqlite_runtime_paths(before, after, databases):
+    """Only known DB shared-memory indexes and provably empty WALs are runtime."""
+    old_sizes = {path: size for path, size, _ in before}
+    new_sizes = {path: size for path, size, _ in after}
+    ignored = {path + "-shm" for path in databases}
+    for database in databases:
+        wal = database + "-wal"
+        # Even a read-only connection can create a new zero-byte WAL. An
+        # absent/empty WAL contains no transactions. Never ignore a WAL that
+        # was nonempty at either endpoint, including truncation/removal.
+        if (wal in old_sizes or wal in new_sizes) and all(
+                size is None or size == 0 for size in (old_sizes.get(wal), new_sizes.get(wal))):
+            ignored.add(wal)
+    return sorted(ignored)
+
+
+def change_details(changes, limit=20):
+    """Bound diagnostics and quote filenames; never include file contents."""
+    total = sum(len(paths) for paths in changes.values())
+    lines = ["変更ファイル: " + ", ".join(f"{kind}={len(paths)}" for kind, paths in changes.items())]
+    shown = 0
+    for kind, paths in changes.items():
+        for path in paths[:max(0, limit - shown)]:
+            lines.append(f"  {kind}: {json.dumps(path, ensure_ascii=False)}")
+            shown += 1
+    if shown < total:
+        lines.append(f"  ... ほか {total - shown} 件")
+    return "\n".join(lines)
 
 
 def stage(c, mode, stopped=False):
@@ -211,16 +251,23 @@ def stage(c, mode, stopped=False):
         try:
             before = tree_stamp(s["original_path"], patterns)
             phase = "source copy"
-            copy_tree(s["original_path"], payload / s["stored_path"], patterns, warnings, skipped)
+            sqlite_databases = copy_tree(s["original_path"], payload / s["stored_path"], patterns, warnings, skipped) or []
             phase = "source inventory after copy"
             after = tree_stamp(s["original_path"], patterns)
         except OSError as e:
             e.add_note(f"Phase: {phase}; source: {s['original_path']}; destination: {payload / s['stored_path']}")
             raise
-        if before != after:
+        # SQLite may create/rebuild its shared-memory index even with mode=ro.
+        # Scope runtime exceptions to databases successfully backed up by the
+        # SQLite API. Nonempty WAL, database and journal changes stay fatal.
+        ignored = sqlite_runtime_paths(before, after, sqlite_databases)
+        s["consistency_ignored"] = ignored
+        changes = source_changes(before, after, ignored)
+        if any(changes.values()):
+            detail = change_details(changes)
             if mode == "cold":
-                raise VaultError(f"cold取得中に保存元が更新されました: {s['original_path']}")
-            warnings.append(f"稼働中に保存元の一覧／時刻が変化しました。複数ファイル間の同時点整合性は未保証: {s['original_path']}")
+                raise VaultError(f"cold取得中に保存元が更新されました: {s['original_path']}\n{detail}")
+            warnings.append(f"稼働中に保存元の一覧／時刻が変化しました。複数ファイル間の同時点整合性は未保証: {s['original_path']}\n{detail}")
         s["excludes"] = patterns
         if s["kind"] == "codex":
             warnings.extend(inspect_jsonl(payload / s["stored_path"]))

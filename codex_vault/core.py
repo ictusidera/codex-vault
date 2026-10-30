@@ -193,12 +193,16 @@ def excluded(rel, patterns):
 
 
 def copy_tree(source, target, patterns, warnings, skipped, sqlite=True):
-    """Never follow links. Fail on unreadable regular files; log explicit omissions."""
+    """Copy files; return relative paths of databases backed up through SQLite.
+
+    Never follow links. Fail on unreadable regular files; log explicit omissions.
+    """
     source, target = Path(source), Path(target)
     no_link_ancestors(source)
     if not source.is_dir():
         raise VaultError(f"必須の保存元フォルダがありません: {source}")
     target.mkdir(parents=True, exist_ok=False)
+    sqlite_databases = []
     def walk(folder):
         with os.scandir(folder) as scan:
             entries = sorted(scan, key=lambda e: e.name)
@@ -238,6 +242,7 @@ def copy_tree(source, target, patterns, warnings, skipped, sqlite=True):
             elif e.is_file(follow_symlinks=False):
                 if sqlite and e.name in dbs:
                     sqlite_copy(src, dst)
+                    sqlite_databases.append(rel.as_posix())
                 else:
                     if sqlite and e.name.endswith(("-wal", "-shm", "-journal")):
                         warnings.append(f"対応DBを識別できないSQLite補助ファイルを原本保存: {src}")
@@ -247,6 +252,7 @@ def copy_tree(source, target, patterns, warnings, skipped, sqlite=True):
                 skipped.append({"path": str(src), "reason": "special_file"})
     walk(source)
     shutil.copystat(source, target)
+    return sqlite_databases
 
 
 def safe_relative(value):

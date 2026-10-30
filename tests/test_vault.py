@@ -6,13 +6,15 @@ import shutil
 import sqlite3
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from codex_vault.archive import export_archive, search_archive
 from codex_vault.core import VaultError, activate, locked, read_json, remove_staging, verify_payload, write_json
-from codex_vault.engine import backup, restic, restore, retention, snapshots, stage
+from codex_vault.engine import (backup, change_details, restic, restore, retention,
+                               snapshots, source_changes, sqlite_runtime_paths, stage)
 from codex_vault.cli import detect_sqlite, doctor, main
 
 
@@ -451,6 +453,101 @@ class CoreTests(Fixture):
         with self.assertRaises(VaultError):
             stage(self.c, "cold")
 
+    def test_cold_accepts_reader_created_sidecars_of_cleanly_closed_wal_db(self):
+        db = self.codex / "stopped.sqlite"
+        with contextlib.closing(sqlite3.connect(db)) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("CREATE TABLE data(value)")
+            conn.execute("INSERT INTO data VALUES ('saved-before-stop')")
+            conn.commit()
+        self.assertFalse(Path(str(db) + "-wal").exists())
+        original = db.read_bytes()
+        payload, manifest = stage(self.c, "cold", True)
+        self.assertEqual(db.read_bytes(), original)
+        with contextlib.closing(sqlite3.connect(payload / "sources/codex/stopped.sqlite")) as conn:
+            self.assertEqual(conn.execute("SELECT value FROM data").fetchall(), [("saved-before-stop",)])
+        source = next(s for s in manifest["sources"] if s["kind"] == "codex")
+        self.assertIn("stopped.sqlite-shm", source["consistency_ignored"])
+        self.assertFalse((payload / "sources/codex/stopped.sqlite-wal").exists())
+        verify_payload(payload)
+
+    def test_cold_preserves_stopped_db_committed_wal_and_handles_reader_shm(self):
+        db = self.codex / "stopped-with-wal.sqlite"
+        code = """import os, sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+c.execute('PRAGMA journal_mode=WAL')
+c.execute('PRAGMA wal_autocheckpoint=0')
+c.execute('CREATE TABLE data(value)')
+c.execute("INSERT INTO data VALUES ('committed-only-in-wal')")
+c.commit()
+os._exit(0)
+"""
+        subprocess.run([sys.executable, "-c", code, str(db)], check=True)
+        # No SQLite process remains. Simulate a missing reconstructible index.
+        Path(str(db) + "-shm").unlink()
+        wal = Path(str(db) + "-wal")
+        original_db, original_wal = db.read_bytes(), wal.read_bytes()
+        self.assertGreater(len(original_wal), 0)
+        payload, manifest = stage(self.c, "cold", True)
+        self.assertEqual(db.read_bytes(), original_db)
+        self.assertEqual(wal.read_bytes(), original_wal)
+        with contextlib.closing(sqlite3.connect(payload / "sources/codex" / db.name)) as conn:
+            self.assertEqual(conn.execute("SELECT value FROM data").fetchall(), [("committed-only-in-wal",)])
+        source = next(s for s in manifest["sources"] if s["kind"] == "codex")
+        self.assertIn(db.name + "-shm", source["consistency_ignored"])
+        self.assertNotIn(db.name + "-wal", source["consistency_ignored"])
+
+    def test_cold_rejects_real_wal_commit_and_reports_changed_path(self):
+        from codex_vault.engine import copy_tree as real
+        def changing(*args, **kwargs):
+            databases = real(*args, **kwargs)
+            if Path(args[0]) == self.dbroot:
+                self.writer.execute("INSERT INTO data VALUES ('new-commit')")
+                self.writer.commit()
+            return databases
+        with patch("codex_vault.engine.copy_tree", side_effect=changing):
+            with self.assertRaisesRegex(VaultError, 'modified: "state_99.sqlite-wal"'):
+                stage(self.c, "cold", True)
+
+    def test_cold_reports_add_remove_modify_and_retains_unknown_shm(self):
+        changed = self.project / "ordinary-shm"
+        removed = self.project / "removed.txt"
+        changed.write_text("old")
+        removed.write_text("old")
+        from codex_vault.engine import copy_tree as real
+        def changing(*args, **kwargs):
+            databases = real(*args, **kwargs)
+            if Path(args[0]) == self.project:
+                changed.write_text("new-and-longer")
+                removed.unlink()
+                (self.project / "added.txt").write_text("new")
+            return databases
+        with patch("codex_vault.engine.copy_tree", side_effect=changing):
+            with self.assertRaises(VaultError) as caught:
+                stage(self.c, "cold", True)
+        message = str(caught.exception)
+        self.assertIn('added: "added.txt"', message)
+        self.assertIn('removed: "removed.txt"', message)
+        self.assertIn('modified: "ordinary-shm"', message)
+
+    def test_nonempty_wal_growth_truncation_and_deletion_remain_significant(self):
+        for old_size, new_size in ((0, 4096), (4096, 8192), (4096, 0), (4096, None)):
+            with self.subTest(old=old_size, new=new_size):
+                before = [("db-wal", old_size, 1)]
+                after = [] if new_size is None else [("db-wal", new_size, 2)]
+                ignored = sqlite_runtime_paths(before, after, ["db"])
+                self.assertNotIn("db-wal", ignored)
+                self.assertTrue(any(source_changes(before, after, ignored).values()))
+
+    def test_change_diagnostics_are_bounded_and_escape_filenames(self):
+        changes = {"added": ["a\nunsafe-name"] + [f"file-{i:03}" for i in range(30)],
+                   "removed": [], "modified": []}
+        detail = change_details(changes)
+        self.assertIn('"a\\nunsafe-name"', detail)
+        self.assertNotIn("a\nunsafe-name", detail)
+        self.assertEqual(sum(line.startswith("  added:") for line in detail.splitlines()), 20)
+        self.assertIn("11 件", detail)
+
     def test_source_change_aborts_cold(self):
         from codex_vault.engine import copy_tree as real
         def changing(*args, **kw):
@@ -458,7 +555,7 @@ class CoreTests(Fixture):
             if Path(args[0]) == self.project:
                 (self.project / "new-file").write_text("concurrent change")
         with patch("codex_vault.engine.copy_tree", side_effect=changing):
-            with self.assertRaises(VaultError):
+            with self.assertRaisesRegex(VaultError, 'added: "new-file"'):
                 stage(self.c, "cold", True)
 
     def test_archive_rebuild_japanese_search_no_duplicate_events(self):

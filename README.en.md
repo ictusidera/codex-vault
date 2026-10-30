@@ -1,6 +1,6 @@
-# Codex Vault 1.0.5
+# Codex Vault 1.0.6
 
-1.0.5 excludes generated arg0 helper directories and handles read-only staging copies during Windows cleanup. Existing configuration, credentials, and repositories remain usable. See the [changelog](docs/CHANGELOG.md).
+1.0.6 fixes false cold-backup change detection caused by SQLite reader-created runtime files. Real source changes now include filenames in diagnostics. Existing configuration, credentials, and repositories remain usable. See the [changelog](docs/CHANGELOG.md).
 
 Codex Vault backs up local Codex conversations, state databases, settings, and development projects as encrypted, versioned snapshots in a restic repository. It is designed primarily for everyday use on Windows and uses only the Python standard library.
 
@@ -71,6 +71,8 @@ Keep backup storage independent of the PC itself. A separate partition on the sa
 Conversations and source files exist in plaintext in the staging directory. On Windows, the tool configures user-specific access controls and removes staging copies after a successful backup. Copies remain for diagnosis after failures or forced termination. Use BitLocker or equivalent protection for the system drive as well. Ordinary deletion does not guarantee secure erasure on an SSD.
 
 The staging area needs **at least enough free space for all registered backup data**. During activation, the destination also needs room for a new copy. For large collections of build outputs or other files, review exclusions and consider increasing the scheduled interval to 120 minutes or more.
+
+Pointing `repository` at an external drive does not change the default staging location on C:. To move staging, stop running and scheduled operations, run `python -m codex_vault clean-stage` before editing the configuration, then change only `work_dir` in the existing JSON, for example to `E:/CodexVault/work`. Keep it beside `E:/CodexVault/restic`, outside both the repository and backup sources. The restic cache follows `work_dir/cache`; the old cache is not moved or deleted automatically. You may remove only the old `work_dir/cache` while operations are stopped if it is no longer needed. Use NTFS for the Windows working drive because this version configures Windows access controls. Preserve configuration, credentials, and `vault_id`; do not rerun `configure` or `init` for this change.
 
 ## 4. Initial Setup on Windows
 
@@ -154,6 +156,14 @@ python -m codex_vault check --read-data
 ```
 
 `--stopped` is your confirmation that the relevant applications have stopped. It does not automatically prove that every process is stopped. A cold backup fails if the source file inventory, file sizes, or modification times change during collection. Unsaved changes that exist only inside an application's memory cannot be backed up.
+
+**`--stopped` does not stop applications.** Exit the Codex app, including any tray instance, close Codex CLI and IDE extensions, and stop processes synchronizing or building files inside the sources. Run the command from an ordinary PowerShell session.
+
+Versions through 1.0.5 could mistake `-shm` and empty `-wal` files created by a read-only SQLite connection for real source updates. In 1.0.6, only for databases successfully backed up and checked through the SQLite API, metadata comparison ignores the exact `-shm` path and a `-wal` path that is absent or zero bytes at both endpoints. Each source records these relative paths in `consistency_ignored`. A WAL that is nonempty at either endpoint remains significant, including growth, truncation, and removal; database, conversation, and ordinary file changes still abort cold collection. The tool does not manually delete source DB/WAL files or bypass pending WAL data with `immutable=1`. See SQLite's official [WAL documentation](https://sqlite.org/wal.html) and [temporary-file documentation](https://sqlite.org/tempfiles.html).
+
+If changes remain, diagnostics show counts and up to 20 relative filenames: `added`, `removed`, and `modified` (size or modification time changed). File contents are not displayed. Use the paths to identify the application or synchronization process involved. This release does not establish the cause of changes on a particular user's PC.
+
+This error occurs during collection, before restic snapshot creation. Deleting only `work` neither updates the sources nor deletes snapshots in a separate external repository. Rerunning `init` does not address it: `init` is needed only when first creating a new restic repository.
 
 **After the first backup, complete at least one restore test using the procedure below before starting routine operation.**
 
